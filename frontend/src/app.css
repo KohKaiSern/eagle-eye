@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", sans-serif;
+  --color-brand-50: #eff8ff;
+  --color-brand-100: #dcefff;
+  --color-brand-500: #3390db;
+  --color-brand-600: #247fc8;
+  --color-ink-950: #0b1220;
+}
+
+@layer base {
+  html {
+    @apply bg-white;
+  }
+
+  body {
+    @apply m-0 min-w-80 bg-white font-sans text-slate-700 antialiased;
+    background-image: radial-gradient(
+      80% 30% at 50% 0%,
+      rgb(51 144 219 / 16%),
+      transparent 75%
+    );
+    background-repeat: no-repeat;
+  }
+
+  button, input {
+    font: inherit;
+  }
+
+  button, a {
+    @apply focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500;
+  }
+
+  ::selection {
+    @apply bg-brand-100 text-slate-950;
+  }
+}

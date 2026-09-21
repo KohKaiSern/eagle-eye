@@ -1,0 +1,52 @@
+[
+  {
+    "id": "labelled-lease",
+    "text": "LEASE AGREEMENT\n\nLandlord: ABC Properties\nTenant: XYZ Corp\n\nPremises: Suite 100, 500 Main Street – about 2,000 square feet.\n\nTerm: 3 years, starting July 1, 2026.\n\nRent: $10,000/month, due on the 1st.\n\nRent Increase: Rent goes up every year by either 2% or inflation – whichever is more.\n\nUtilities: Tenant pays for electricity and water.\n\nRepairs: Tenant must fix anything that breaks.\n\nTermination: Either party can end this lease with 30 days' notice",
+    "expected_parties": [
+      {"name": "ABC Properties", "entity_type": "organization"},
+      {"name": "XYZ Corp", "entity_type": "organization"}
+    ],
+    "expected_dates": [
+      {
+        "date": "01/07/2026",
+        "event_desc": "Contract effective or commencement date"
+      },
+      {
+        "date": "30/06/2029",
+        "event_desc": "Contract expiration or end date"
+      }
+    ]
+  },
+  {
+    "id": "fixed-service-term",
+    "text": "This Services Agreement is between Lion City Pte. Ltd., the service provider, and Dana Lim, the customer. The initial term starts on 04/03/2026 and continues for twelve months.",
+    "expected_parties": [
+      {"name": "Lion City Pte. Ltd.", "entity_type": "organization"},
+      {"name": "Dana Lim", "entity_type": "person"}
+    ],
+    "expected_dates": [
+      {
+        "date": "04/03/2026",
+        "event_desc": "Contract effective or commencement date"
+      },
+      {
+        "date": "03/03/2027",
+        "event_desc": "Contract expiration or end date"
+      }
+    ]
+  },
+  {
+    "id": "event-dependent-end",
+    "text": "This agreement between Harbour Works Pte. Ltd. and Northstar Ltd. starts on 15 August 2026 and ends 30 days after final delivery.",
+    "expected_parties": [
+      {"name": "Harbour Works Pte. Ltd.", "entity_type": "organization"},
+      {"name": "Northstar Ltd.", "entity_type": "organization"}
+    ],
+    "expected_dates": [
+      {
+        "date": "15/08/2026",
+        "event_desc": "Contract effective or commencement date"
+      }
+    ]
+  }
+]
