@@ -2,8 +2,83 @@
 
 from unittest import TestCase
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
-from backend.extraction.clause_extractor import CUAD_CATEGORIES, extract_clauses
+import torch
+
+from backend.extraction.clause_extractor import (
+    CUAD_CATEGORIES, MAX_SEQUENCE_LENGTH, WINDOW_BATCH_SIZE,
+    _answer_question, _question_windows, extract_clauses,
+)
+
+
+class CharacterTokenizer:
+    cls_token_id = 0
+    sep_token_id = 2
+    pad_token_id = 1
+
+    def __call__(self, text, **kwargs):
+        assert kwargs["truncation"] is False
+        assert kwargs["padding"] is False
+        assert kwargs["add_special_tokens"] is False
+        return {
+            "input_ids": [ord(char) + 10 for char in text],
+            "offset_mapping": [(i, i + 1) for i in range(len(text))],
+        }
+
+
+class QuestionWindowTests(TestCase):
+    def test_windows_cover_all_tokens_with_overlap_and_original_offsets(self):
+        text = "x" * 2200
+        windows = list(_question_windows(CharacterTokenizer(), "Question", text))
+        covered = set()
+        previous_end = None
+        for ids, sequence_ids, offsets in windows:
+            self.assertLessEqual(len(ids), MAX_SEQUENCE_LENGTH)
+            spans = [span for seq, span in zip(sequence_ids, offsets) if seq == 1]
+            covered.update(a for a, _ in spans)
+            if previous_end is not None:
+                self.assertEqual(previous_end - spans[0][0], 256)
+            previous_end = spans[-1][1]
+        self.assertEqual(covered, set(range(len(text))))
+        self.assertEqual(previous_end, len(text))
+
+    def test_long_question_reduces_overlap_without_gaps(self):
+        windows = list(_question_windows(CharacterTokenizer(), "q" * 500, "x" * 20))
+        covered = {a for _, seqs, offsets in windows
+                   for seq, (a, _) in zip(seqs, offsets) if seq == 1}
+        self.assertEqual(covered, set(range(20)))
+        self.assertTrue(all(len(ids) <= 512 for ids, _, _ in windows))
+
+    @patch("backend.extraction.clause_extractor._get_clause_components")
+    def test_extracts_beginning_boundary_and_end_spans_in_bounded_batches(self, components):
+        tokenizer = CharacterTokenizer()
+        batches = []
+
+        def predict(input_ids, attention_mask):
+            batches.append(len(input_ids))
+            starts = torch.full(input_ids.shape, -20.0)
+            ends = torch.full(input_ids.shape, -20.0)
+            for i, row in enumerate(input_ids):
+                opening = (row == ord("[") + 10).nonzero().flatten().tolist()
+                closing = (row == ord("]") + 10).nonzero().flatten().tolist()
+                pairs = [(a, b) for a in opening for b in closing if a < b]
+                a, b = pairs[0] if pairs else (0, 0)
+                starts[i, a] = ends[i, b] = 20.0
+            return SimpleNamespace(start_logits=starts, end_logits=ends)
+
+        components.return_value = tokenizer, predict
+        text = "[Beginning]".ljust(500, "x") + "[Boundary clause]"
+        text = text.ljust(1800, "x") + "[Final clause]"
+        answers = _answer_question("Q", text)
+        retained = [a for a in answers if a["score"] >= 0.1 and a["answer"]]
+        self.assertEqual({a["answer"] for a in retained},
+                         {"[Beginning]", "[Boundary clause]", "[Final clause]"})
+        for answer in retained:
+            self.assertEqual(answer["answer"], text[answer["start"]:answer["end"]])
+        self.assertEqual(len(retained), 3)
+        self.assertGreater(len(batches), 1)
+        self.assertLessEqual(max(batches), WINDOW_BATCH_SIZE)
 
 
 class ExtractClausesTests(TestCase):

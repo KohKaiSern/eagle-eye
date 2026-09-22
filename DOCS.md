@@ -25,7 +25,7 @@ backend/
 │   └── readers/
 │       ├── text_formatter.py      file-type dispatch
 │       ├── png_reader.py          PNG and JPEG OCR
-│       ├── pdf_reader.py          embedded PDF text
+│       ├── pdf_reader.py          embedded PDF text and scanned-page OCR
 │       └── docx_reader.py         DOCX paragraphs and tables
 ├── persistence/
 │   ├── database.py                SQLAlchemy models and sessions
@@ -78,6 +78,7 @@ rows.
 2. **Temporary local copy and text conversion.** The backend gives each upload
    a temporary server-side file while it is being processed. `text_formatter`
    dispatches it to the appropriate reader: embedded text is read from PDF,
+   with local OCR for PDF pages without embedded text;
    paragraphs and tables are read from DOCX, TXT is read directly, and PNG or
    JPEG files go through local OCR. Every reader produces one common text and
    confidence shape, allowing all later stages to ignore the original format.
@@ -292,9 +293,13 @@ Output:
 
 ### `backend/extraction/readers/pdf_reader.py`
 
-Exports `read_pdf(filepath)`. `pypdf` reads the embedded text layer of a
-softcopy PDF; scanned PDFs are intentionally not OCRed. Non-empty extracted
-text receives confidence `1.0`, otherwise `0.0`.
+Exports `read_pdf(filepath)`. `pypdf` reads embedded text where available.
+Pages without embedded text are rendered at 300 DPI with `pypdfium2` and passed
+as temporary PNGs to `png_reader.read_image`. This supports multipage scans and
+mixed text/scanned PDFs while preserving page order. Temporary images are removed
+after processing. Confidence is the character-weighted mean of non-empty page
+results: embedded text uses `1.0`, and scanned text uses OCR confidence. An empty
+result receives `0.0`.
 
 ### `backend/extraction/readers/docx_reader.py`
 
@@ -320,7 +325,11 @@ Exports `extract_clauses(formatted_text)`. It runs the extractive question-
 answering model `Rakib/roberta-base-on-cuad` against 39 clause-focused CUAD
 categories. `Parties` and `Expiration Date` are excluded because the dedicated
 party and date extractors own those results.
-Long contracts are processed through overlapping 512-token windows. Answers
+Long contracts are tokenized in full without truncation, then split explicitly
+into overlapping windows. Each window reserves space for the category question
+and RoBERTa special tokens within the 512-token limit. Context overlap is 256
+tokens (reduced when necessary to fit), and inference runs in batches of four
+windows. Answers
 are reconstructed from character offsets into the input, so clause text is
 returned verbatim rather than generated. Low-confidence and no-answer results
 are filtered, and substantially overlapping answers in the same category are
@@ -666,7 +675,8 @@ relevant download servers.
 - Text search scans stored contracts in the application process. A larger
   deployment should move candidate retrieval to a PostgreSQL trigram or
   full-text index.
-- Scanned PDFs are not OCRed. Image OCR supports one image file at a time.
+- PDF OCR runs only on pages without embedded text; pages with partial text
+  layers do not have their remaining image content OCRed.
 - ContractNER is trained primarily on SEC EDGAR contracts, not a representative
   Singapore corpus. Canonical parties remain `unverified` until reviewed or
   checked against a registry.

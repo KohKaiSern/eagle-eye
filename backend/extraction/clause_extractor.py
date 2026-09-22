@@ -1,6 +1,7 @@
 """Extract verbatim CUAD clauses from formatted contract text."""
 
 from functools import lru_cache
+from itertools import islice
 from statistics import fmean
 from typing import Any, TypedDict
 
@@ -12,6 +13,7 @@ from backend.config import MODEL_CACHE
 MODEL_ID = "Rakib/roberta-base-on-cuad"
 MAX_SEQUENCE_LENGTH = 512
 DOCUMENT_STRIDE = 256
+WINDOW_BATCH_SIZE = 4
 MAX_ANSWER_LENGTH = 512
 TOP_K = 5
 N_BEST = 20
@@ -273,47 +275,82 @@ def _get_clause_components() -> tuple[Any, Any]:
     return tokenizer, model
 
 
+def _question_windows(tokenizer: Any, question: str, context: str):
+    """Build RoBERTa question/context windows with original character offsets."""
+
+    question_ids = tokenizer(
+        question, add_special_tokens=False, truncation=False, padding=False,
+        verbose=False,
+    )["input_ids"]
+    document = tokenizer(
+        context, add_special_tokens=False, truncation=False, padding=False,
+        return_offsets_mapping=True, verbose=False,
+    )
+    # RoBERTa pairs use <s> question </s></s> context </s>.
+    prefix = [tokenizer.cls_token_id, *question_ids,
+              tokenizer.sep_token_id, tokenizer.sep_token_id]
+    capacity = MAX_SEQUENCE_LENGTH - len(prefix) - 1
+    if capacity <= 0:
+        raise ValueError("CUAD question leaves no room for contract tokens")
+    overlap = min(DOCUMENT_STRIDE, capacity - 1)
+    ids = document["input_ids"]
+    offsets = document["offset_mapping"]
+    for start in range(0, len(ids), capacity - overlap):
+        end = min(start + capacity, len(ids))
+        yield (
+            prefix + ids[start:end] + [tokenizer.sep_token_id],
+            [None] * len(prefix) + [1] * (end - start) + [None],
+            [(0, 0)] * len(prefix) + list(offsets[start:end]) + [(0, 0)],
+        )
+        if end == len(ids):
+            break
+
+
+def _window_predictions(tokenizer: Any, model: Any, question: str, context: str):
+    """Run bounded batches, leaving offsets anchored to the complete contract."""
+
+    windows = iter(_question_windows(tokenizer, question, context))
+    while batch := list(islice(windows, WINDOW_BATCH_SIZE)):
+        width = max(len(ids) for ids, _, _ in batch)
+        input_ids = torch.tensor([
+            ids + [tokenizer.pad_token_id] * (width - len(ids))
+            for ids, _, _ in batch
+        ])
+        attention_mask = torch.tensor([
+            [1] * len(ids) + [0] * (width - len(ids))
+            for ids, _, _ in batch
+        ])
+        with torch.inference_mode():
+            output = model(input_ids=input_ids, attention_mask=attention_mask)
+        for index, (ids, sequence_ids, offsets) in enumerate(batch):
+            yield (sequence_ids, offsets, output.start_logits[index, :len(ids)],
+                   output.end_logits[index, :len(ids)])
+
+
 def _answer_question(question: str, context: str) -> list[_Answer]:
-    """Run extractive QA over overlapping windows of the complete context."""
+    """Run extractive QA over explicit windows of the complete context."""
 
     tokenizer, model = _get_clause_components()
-    encoded = tokenizer(
-        question,
-        context,
-        truncation="only_second",
-        max_length=MAX_SEQUENCE_LENGTH,
-        stride=DOCUMENT_STRIDE,
-        padding=True,
-        return_overflowing_tokens=True,
-        return_offsets_mapping=True,
-        return_tensors="pt",
-    )
-    offsets = encoded.pop("offset_mapping")
-    encoded.pop("overflow_to_sample_mapping", None)
-
-    with torch.inference_mode():
-        output = model(**encoded)
 
     candidates: dict[tuple[int, int], _Answer] = {}
     null_scores: list[float] = []
 
-    for feature_index in range(encoded["input_ids"].shape[0]):
-        sequence_ids = encoded.sequence_ids(feature_index)
-        input_ids = encoded["input_ids"][feature_index]
-        cls_matches = (input_ids == tokenizer.cls_token_id).nonzero(as_tuple=False)
-        cls_index = int(cls_matches[0].item()) if len(cls_matches) else 0
+    for sequence_ids, offsets, start_logits, end_logits in _window_predictions(
+        tokenizer, model, question, context
+    ):
+        cls_index = 0
 
         valid_mask = torch.tensor(
             [sequence_id == 1 for sequence_id in sequence_ids],
             dtype=torch.bool,
-            device=output.start_logits.device,
+            device=start_logits.device,
         )
         valid_mask[cls_index] = True
 
-        start_logits = output.start_logits[feature_index].masked_fill(
+        start_logits = start_logits.masked_fill(
             ~valid_mask, float("-inf")
         )
-        end_logits = output.end_logits[feature_index].masked_fill(
+        end_logits = end_logits.masked_fill(
             ~valid_mask, float("-inf")
         )
         start_probabilities = torch.softmax(start_logits, dim=0)
@@ -338,8 +375,8 @@ def _answer_question(question: str, context: str) -> list[_Answer]:
                 if end_index - start_index + 1 > MAX_ANSWER_LENGTH:
                     continue
 
-                start = int(offsets[feature_index, start_index, 0])
-                end = int(offsets[feature_index, end_index, 1])
+                start = int(offsets[start_index][0])
+                end = int(offsets[end_index][1])
                 if end <= start:
                     continue
 
@@ -408,7 +445,7 @@ def _deduplicate(candidates: list[_Candidate]) -> list[_Candidate]:
 def extract_clauses(formatted_text: FormattedText) -> ClauseResult:
     """Extract CUAD clause spans directly from formatted contract text.
 
-    Transformers applies an overlapping 512-token sliding window internally.
+    Explicit overlapping windows fit each question and context into 512 tokens.
     Answers are reconstructed with character offsets into the original text so
     the returned clause text is never generated, normalized, or rewritten.
     """
